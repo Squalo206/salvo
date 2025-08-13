@@ -171,7 +171,6 @@ def run_once_for(place, center_lat, center_lon):
     # 3) Se non è partito nulla ma "ci sono velivoli", manda un riepilogo (almeno 1 messaggio ogni run)
     if alerted == 0 and len(eligible) > 0:
         nearest_dist, nearest_alt, nearest_ac = eligible[0]
-        # Riepilogo compatto (max 6 righe di dettaglio)
         lines = [
             f"✈️ {len(eligible)} velivolo/i a bassa quota — {place}",
             f"Raggio: {RADIUS_KM:.0f} km • Soglia: < {int(ALT_THRESHOLD_M)} m",
@@ -182,7 +181,6 @@ def run_once_for(place, center_lat, center_lon):
         if len(eligible) > 6:
             lines.append(f"+{len(eligible)-6} altri…")
 
-        # Link utili del più vicino
         lat = nearest_ac.get("lat"); lon = nearest_ac.get("lon")
         lines.append(f"FR24: {fr24_url(nearest_ac, lat, lon)}")
         lines.append(f"ADSBx: {adsbx_url(nearest_ac)}")
