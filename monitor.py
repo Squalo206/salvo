@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 CENTER_LAT = 42.050      # San Salvo
 CENTER_LON = 14.717
 RADIUS_KM = 40.0
-ALT_THRESHOLD_M = 15000.0
+ALT_THRESHOLD_M = 2000.0
 QUIET_MINUTES = 10
 
 # Endpoint gratuiti compatibili con ADS-B Exchange v2
@@ -135,10 +135,6 @@ def run_once():
     print(f"Done at {now.isoformat()} — alerts sent: {alerted}")
 
 if __name__ == "__main__":
-        # MESSAGGIO DI TEST
-    try:
-        send_telegram("✅ Test: Notifica GitHub Actions → Telegram funzionante!")
-    except Exception as e:
-        print("Errore invio Telegram:", e)
+       
 
     run_once()
