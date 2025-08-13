@@ -11,7 +11,8 @@ LOCATIONS = [
 # === PARAMETRI COMUNI ===
 RADIUS_KM       = 40.0
 ALT_THRESHOLD_M = 2000.0
-QUIET_MINUTES   = 10
+QUIET_MINUTES   = 10           # antispam per singolo velivolo/località
+STATE_FILE      = "state.json"
 
 # Endpoint gratuiti compatibili con ADS-B Exchange v2
 PROVIDERS = [
@@ -21,13 +22,11 @@ PROVIDERS = [
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
-STATE_FILE = "state.json"
 
 def km_to_nm(km): return km * 0.539956803
 def feet_to_m(ft): return ft * 0.3048
 
 def haversine_km(lat1, lon1, lat2, lon2):
-    import math
     R = 6371.0088
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
@@ -58,7 +57,6 @@ def send_telegram(text):
 # ---- Link utili (FR24 + ADSBExchange) ---------------------------------------
 
 def fr24_url(ac, lat=None, lon=None):
-    """Costruisce un link FR24 sensato: prima callsign live, poi pagina aircraft per registration, infine mappa centrata su lat/lon."""
     call = (ac.get("call") or ac.get("flight") or "").strip().replace(" ", "")
     reg  = (ac.get("r") or "").strip().replace(" ", "")
     if call:
@@ -66,16 +64,14 @@ def fr24_url(ac, lat=None, lon=None):
     if reg:
         return f"https://www.flightradar24.com/data/aircraft/{reg}"
     if lat is not None and lon is not None:
-        # Mappa centrata sulla posizione attuale (zoom 8)
         return f"https://www.flightradar24.com/{lat:.5f},{lon:.5f}/8"
     return "https://www.flightradar24.com/"
 
 def adsbx_url(ac):
-    """Link diretto all’icona su ADSBExchange Globe quando abbiamo l’ICAO hex."""
     hx = (ac.get("icao") or ac.get("hex") or "").strip().lower()
     return f"https://globe.adsbexchange.com/?icao={hx}" if hx else "https://globe.adsbexchange.com/"
 
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 def fetch_aircraft(lat, lon, radius_km):
     range_nm = max(1, int(round(km_to_nm(radius_km))))
@@ -138,8 +134,9 @@ def run_once_for(place, center_lat, center_lon):
     now = datetime.now(timezone.utc)
 
     aircraft = fetch_aircraft(center_lat, center_lon, RADIUS_KM)
-    alerted = 0
 
+    # 1) Filtra tutti i velivoli che rispettano raggio/altitudine
+    eligible = []
     for ac in aircraft:
         lat, lon = ac.get("lat"), ac.get("lon")
         if lat is None or lon is None:
@@ -150,13 +147,19 @@ def run_once_for(place, center_lat, center_lon):
         alt_m = get_altitude_m(ac)
         if alt_m is None or alt_m >= ALT_THRESHOLD_M:
             continue
+        eligible.append((dist_km, alt_m, ac))
 
-        label, key = identify(ac)
+    # Ordina per distanza (più vicini prima)
+    eligible.sort(key=lambda x: x[0])
+
+    # 2) Invia alert individuali solo per i "nuovi" (fuori quiet)
+    alerted = 0
+    for dist_km, alt_m, ac in eligible:
+        _, key = identify(ac)
         scoped_key = f"{place}:{key}"  # antispam separato per località
         last = state.get(scoped_key)
         if last and (now - last) < quiet:
             continue
-
         msg = format_msg(ac, dist_km, alt_m, place)
         try:
             send_telegram(msg)
@@ -165,8 +168,32 @@ def run_once_for(place, center_lat, center_lon):
         except Exception as e:
             print(f"Telegram error ({place}):", e)
 
+    # 3) Se non è partito nulla ma "ci sono velivoli", manda un riepilogo (almeno 1 messaggio ogni run)
+    if alerted == 0 and len(eligible) > 0:
+        nearest_dist, nearest_alt, nearest_ac = eligible[0]
+        # Riepilogo compatto (max 6 righe di dettaglio)
+        lines = [
+            f"✈️ {len(eligible)} velivolo/i a bassa quota — {place}",
+            f"Raggio: {RADIUS_KM:.0f} km • Soglia: < {int(ALT_THRESHOLD_M)} m",
+        ]
+        for dist_km, alt_m, ac in eligible[:6]:
+            lab, _ = identify(ac)
+            lines.append(f"• {lab}: {dist_km:.1f} km, {int(round(alt_m))} m")
+        if len(eligible) > 6:
+            lines.append(f"+{len(eligible)-6} altri…")
+
+        # Link utili del più vicino
+        lat = nearest_ac.get("lat"); lon = nearest_ac.get("lon")
+        lines.append(f"FR24: {fr24_url(nearest_ac, lat, lon)}")
+        lines.append(f"ADSBx: {adsbx_url(nearest_ac)}")
+
+        try:
+            send_telegram("\n".join(lines))
+        except Exception as e:
+            print(f"Telegram summary error ({place}):", e)
+
     save_state(state)
-    print(f"[{place}] {now.isoformat()} — alerts sent: {alerted}")
+    print(f"[{place}] {now.isoformat()} — eligible: {len(eligible)} — alerts sent: {alerted}")
 
 def main():
     for name, lat, lon in LOCATIONS:
