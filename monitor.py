@@ -2,12 +2,16 @@
 import os, math, json, requests
 from datetime import datetime, timedelta, timezone
 
-# === CONFIG ===
-CENTER_LAT = 42.050      # San Salvo
-CENTER_LON = 14.717
-RADIUS_KM = 40.0
+# === LOCALITÀ DA MONITORARE (nome, lat, lon) ===
+LOCATIONS = [
+    ("San Salvo", 42.050, 14.717),
+    ("Isernia",   41.5931, 14.2326),
+]
+
+# === PARAMETRI COMUNI ===
+RADIUS_KM       = 40.0
 ALT_THRESHOLD_M = 2000.0
-QUIET_MINUTES = 10
+QUIET_MINUTES   = 10
 
 # Endpoint gratuiti compatibili con ADS-B Exchange v2
 PROVIDERS = [
@@ -23,6 +27,7 @@ def km_to_nm(km): return km * 0.539956803
 def feet_to_m(ft): return ft * 0.3048
 
 def haversine_km(lat1, lon1, lat2, lon2):
+    import math
     R = 6371.0088
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
@@ -80,7 +85,7 @@ def identify(ac):
     key = (icao or callsign or reg or "unknown").upper()
     return label, key
 
-def format_msg(ac, dist_km, alt_m):
+def format_msg(ac, dist_km, alt_m, place):
     callsign = ac.get("call") or ac.get("flight") or ""
     reg = ac.get("r") or ""
     icao = ac.get("icao") or ac.get("hex") or ""
@@ -89,7 +94,7 @@ def format_msg(ac, dist_km, alt_m):
     hdg = ac.get("trak") or ac.get("hdg")
 
     lines = [
-        "✈️ Velivolo a bassa quota",
+        f"✈️ Velivolo a bassa quota — {place}",
         f"{callsign} {f'({reg})' if reg else ''}".strip() or (icao or "ICAO?"),
         f"Tipo: {typ}" if typ else None,
         f"Distanza: {dist_km:.1f} km",
@@ -99,19 +104,19 @@ def format_msg(ac, dist_km, alt_m):
     ]
     return "\n".join([x for x in lines if x])
 
-def run_once():
+def run_once_for(place, center_lat, center_lon):
     state = load_state()
     quiet = timedelta(minutes=QUIET_MINUTES)
     now = datetime.now(timezone.utc)
 
-    aircraft = fetch_aircraft(CENTER_LAT, CENTER_LON, RADIUS_KM)
+    aircraft = fetch_aircraft(center_lat, center_lon, RADIUS_KM)
     alerted = 0
 
     for ac in aircraft:
         lat, lon = ac.get("lat"), ac.get("lon")
-        if lat is None or lon is None: 
+        if lat is None or lon is None:
             continue
-        dist_km = haversine_km(CENTER_LAT, CENTER_LON, lat, lon)
+        dist_km = haversine_km(center_lat, center_lon, lat, lon)
         if dist_km > RADIUS_KM + 0.5:
             continue
         alt_m = get_altitude_m(ac)
@@ -119,22 +124,30 @@ def run_once():
             continue
 
         label, key = identify(ac)
-        last = state.get(key)
+        # chiave distinta per località per evitare antispam tra città diverse
+        scoped_key = f"{place}:{key}"
+        last = state.get(scoped_key)
         if last and (now - last) < quiet:
             continue
 
-        msg = format_msg(ac, dist_km, alt_m)
+        msg = format_msg(ac, dist_km, alt_m, place)
         try:
             send_telegram(msg)
-            state[key] = now
+            state[scoped_key] = now
             alerted += 1
         except Exception as e:
-            print("Telegram error:", e)
+            print(f"Telegram error ({place}):", e)
 
     save_state(state)
-    print(f"Done at {now.isoformat()} — alerts sent: {alerted}")
+    print(f"[{place}] {now.isoformat()} — alerts sent: {alerted}")
+
+def main():
+    for name, lat, lon in LOCATIONS:
+        print(f"--- Controllo {name} ---")
+        try:
+            run_once_for(name, lat, lon)
+        except Exception as e:
+            print(f"Errore per {name}: {e}")
 
 if __name__ == "__main__":
-       
-
-    run_once()
+    main()
