@@ -135,4 +135,10 @@ def run_once():
     print(f"Done at {now.isoformat()} — alerts sent: {alerted}")
 
 if __name__ == "__main__":
+        # MESSAGGIO DI TEST
+    try:
+        send_telegram("✅ Test: Notifica GitHub Actions → Telegram funzionante!")
+    except Exception as e:
+        print("Errore invio Telegram:", e)
+
     run_once()
