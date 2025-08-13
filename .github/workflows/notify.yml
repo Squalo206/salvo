@@ -8,8 +8,13 @@ on:
 jobs:
   run-monitor:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       contents: write        # serve per salvare state.json nel repo
+    concurrency:
+      group: adsb-monitor-${{ github.ref }}
+      cancel-in-progress: true
+
     steps:
       - uses: actions/checkout@v4
 
