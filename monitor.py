@@ -52,8 +52,30 @@ def save_state(state):
 
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    r = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=20)
+    r = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "disable_web_page_preview": True}, timeout=20)
     r.raise_for_status()
+
+# ---- Link utili (FR24 + ADSBExchange) ---------------------------------------
+
+def fr24_url(ac, lat=None, lon=None):
+    """Costruisce un link FR24 sensato: prima callsign live, poi pagina aircraft per registration, infine mappa centrata su lat/lon."""
+    call = (ac.get("call") or ac.get("flight") or "").strip().replace(" ", "")
+    reg  = (ac.get("r") or "").strip().replace(" ", "")
+    if call:
+        return f"https://www.flightradar24.com/{call}"
+    if reg:
+        return f"https://www.flightradar24.com/data/aircraft/{reg}"
+    if lat is not None and lon is not None:
+        # Mappa centrata sulla posizione attuale (zoom 8)
+        return f"https://www.flightradar24.com/{lat:.5f},{lon:.5f}/8"
+    return "https://www.flightradar24.com/"
+
+def adsbx_url(ac):
+    """Link diretto all’icona su ADSBExchange Globe quando abbiamo l’ICAO hex."""
+    hx = (ac.get("icao") or ac.get("hex") or "").strip().lower()
+    return f"https://globe.adsbexchange.com/?icao={hx}" if hx else "https://globe.adsbexchange.com/"
+
+# -----------------------------------------------------------------------------
 
 def fetch_aircraft(lat, lon, radius_km):
     range_nm = max(1, int(round(km_to_nm(radius_km))))
@@ -92,6 +114,10 @@ def format_msg(ac, dist_km, alt_m, place):
     typ = ac.get("t") or ac.get("type") or ""
     spd = ac.get("gs") or ac.get("spd")
     hdg = ac.get("trak") or ac.get("hdg")
+    lat = ac.get("lat"); lon = ac.get("lon")
+
+    fr24 = fr24_url(ac, lat, lon)
+    globe = adsbx_url(ac)
 
     lines = [
         f"✈️ Velivolo a bassa quota — {place}",
@@ -101,6 +127,8 @@ def format_msg(ac, dist_km, alt_m, place):
         f"Quota: {int(round(alt_m))} m" if alt_m is not None else "Quota: n/d",
         f"Velocità: {int(round(spd))} kt" if isinstance(spd, (int, float)) else None,
         f"Prua: {int(round(hdg))}°" if isinstance(hdg, (int, float)) else None,
+        f"FR24: {fr24}",
+        f"ADSBx: {globe}",
     ]
     return "\n".join([x for x in lines if x])
 
@@ -124,8 +152,7 @@ def run_once_for(place, center_lat, center_lon):
             continue
 
         label, key = identify(ac)
-        # chiave distinta per località per evitare antispam tra città diverse
-        scoped_key = f"{place}:{key}"
+        scoped_key = f"{place}:{key}"  # antispam separato per località
         last = state.get(scoped_key)
         if last and (now - last) < quiet:
             continue
