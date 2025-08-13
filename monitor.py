@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 CENTER_LAT = 42.050      # San Salvo
 CENTER_LON = 14.717
 RADIUS_KM = 40.0
-ALT_THRESHOLD_M = 2000.0
+ALT_THRESHOLD_M = 15000.0
 QUIET_MINUTES = 10
 
 # Endpoint gratuiti compatibili con ADS-B Exchange v2
