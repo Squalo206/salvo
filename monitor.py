@@ -10,7 +10,7 @@ LOCATIONS = [
 
 # === PARAMETRI COMUNI ===
 RADIUS_KM       = 40.0
-ALT_THRESHOLD_M = 15000.0
+ALT_THRESHOLD_M = 2000.0
 QUIET_MINUTES   = 10           # antispam per singolo velivolo/località
 STATE_FILE      = "state.json"
 
