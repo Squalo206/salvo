@@ -10,7 +10,7 @@ LOCATIONS = [
 
 # === PARAMETRI COMUNI ===
 RADIUS_KM       = 40.0
-ALT_THRESHOLD_M = 2000.0
+ALT_THRESHOLD_M = 15000.0
 QUIET_MINUTES   = 10           # antispam per singolo velivolo/località
 STATE_FILE      = "state.json"
 
@@ -50,9 +50,12 @@ def save_state(state):
         json.dump({k: v.isoformat() for k, v in state.items()}, f)
 
 def send_telegram(text):
+    # Invia a più chat ID: quello principale e quello aggiuntivo
+    chat_ids = [TELEGRAM_CHAT_ID, "5278987817"]
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    r = requests.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "disable_web_page_preview": True}, timeout=20)
-    r.raise_for_status()
+    for cid in chat_ids:
+        r = requests.post(url, json={"chat_id": cid, "text": text, "disable_web_page_preview": True}, timeout=20)
+        r.raise_for_status()
 
 # ---- Link utili (FR24 + ADSBExchange) ---------------------------------------
 
@@ -135,7 +138,6 @@ def run_once_for(place, center_lat, center_lon):
 
     aircraft = fetch_aircraft(center_lat, center_lon, RADIUS_KM)
 
-    # 1) Filtra tutti i velivoli che rispettano raggio/altitudine
     eligible = []
     for ac in aircraft:
         lat, lon = ac.get("lat"), ac.get("lon")
@@ -149,14 +151,12 @@ def run_once_for(place, center_lat, center_lon):
             continue
         eligible.append((dist_km, alt_m, ac))
 
-    # Ordina per distanza (più vicini prima)
     eligible.sort(key=lambda x: x[0])
 
-    # 2) Invia alert individuali solo per i "nuovi" (fuori quiet)
     alerted = 0
     for dist_km, alt_m, ac in eligible:
         _, key = identify(ac)
-        scoped_key = f"{place}:{key}"  # antispam separato per località
+        scoped_key = f"{place}:{key}"
         last = state.get(scoped_key)
         if last and (now - last) < quiet:
             continue
@@ -168,7 +168,6 @@ def run_once_for(place, center_lat, center_lon):
         except Exception as e:
             print(f"Telegram error ({place}):", e)
 
-    # 3) Se non è partito nulla ma "ci sono velivoli", manda un riepilogo (almeno 1 messaggio ogni run)
     if alerted == 0 and len(eligible) > 0:
         nearest_dist, nearest_alt, nearest_ac = eligible[0]
         lines = [
