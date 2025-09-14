@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-import os, math, json, requests
+# -*- coding: utf-8 -*-
+
+import os
+import math
+import json
+import requests
 from datetime import datetime, timedelta, timezone
 
 # === LOCALITÀ DA MONITORARE (nome, lat, lon) ===
@@ -11,7 +16,7 @@ LOCATIONS = [
 # === PARAMETRI COMUNI ===
 RADIUS_KM       = 40.0
 ALT_THRESHOLD_M = 2000.0
-QUIET_MINUTES   = 10           # antispam per singolo velivolo/località
+QUIET_MINUTES   = 10            # antispam per singolo velivolo/località
 STATE_FILE      = "state.json"
 
 # Endpoint gratuiti compatibili con ADS-B Exchange v2
@@ -20,9 +25,12 @@ PROVIDERS = [
     "https://api.adsb.lol",
 ]
 
-TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID")  # può non esserci -> gestito sotto
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID")  # opzionale
+# Facoltativo: lista chat extra separata da virgole (es. "123,456,789")
+TELEGRAM_EXTRA_CHAT_IDS = os.environ.get("TELEGRAM_EXTRA_CHAT_IDS", "")
 
+# ----------------- UTIL -----------------
 def km_to_nm(km): return km * 0.539956803
 def feet_to_m(ft): return ft * 0.3048
 
@@ -34,69 +42,154 @@ def haversine_km(lat1, lon1, lat2, lon2):
     return 2 * R * math.asin(math.sqrt(a))
 
 def load_state():
-    if not os.path.exists(STATE_FILE): return {}
+    if not os.path.exists(STATE_FILE): 
+        return {}
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             raw = json.load(f)
         out = {}
         for k, v in raw.items():
-            try: out[k] = datetime.fromisoformat(v)
-            except: pass
+            try:
+                out[k] = datetime.fromisoformat(v)
+            except Exception:
+                pass
         return out
-    except: return {}
+    except Exception:
+        return {}
 
 def save_state(state):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
-        json.dump({k: v.isoformat() for k, v in state.items()}, f)
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump({k: v.isoformat() for k, v in state.items()}, f, ensure_ascii=False)
+    except Exception as e:
+        print("Save state error:", e)
 
 # ---------- Foto aereo (Planespotters) ---------------------------------------
-def get_aircraft_photo(reg):
+def get_aircraft_photo(reg=None, icao=None):
     """
-    Restituisce URL di una foto (se disponibile) per la registrazione 'reg'
-    usando l'API pubblica di planespotters.net.
+    Ritorna un URL immagine (stringa) se disponibile.
+    Prova prima per matricola (reg), poi per esadecimale (icao/hex).
+    Gestisce sia stringhe dirette che eventuali dizionari (retro-compat).
     """
-    if not reg:
+    def _first_url_from_photo_obj(p):
+        # preferisci thumbnail_large, poi thumbnail, poi image (se presente)
+        candidates = [p.get("thumbnail_large"), p.get("thumbnail"), p.get("image")]
+        for v in candidates:
+            if isinstance(v, str) and v.startswith("http"):
+                return v
+            if isinstance(v, dict):
+                u = v.get("src") or v.get("href")
+                if isinstance(u, str) and u.startswith("http"):
+                    return u
         return None
-    try:
-        url = f"https://api.planespotters.net/photos/reg/{reg}"
-        r = requests.get(url, timeout=10)
-        if r.status_code == 200:
+
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; ADSBbot/1.0)"}
+    endpoints = []
+
+    reg = (reg or "").strip().upper()
+    icao = (icao or "").strip().lower()
+
+    if reg:
+        endpoints.append(f"https://api.planespotters.net/pub/photos/reg/{reg}")
+    if icao:
+        endpoints.append(f"https://api.planespotters.net/pub/photos/hex/{icao}")
+
+    for url in endpoints:
+        try:
+            r = requests.get(url, headers=headers, timeout=10)
+            if r.status_code != 200:
+                continue
             data = r.json()
-            photos = data.get("photos", [])
-            if photos:
-                # Preferisco la miniatura grande per compatibilità e rapidità
-                return photos[0].get("thumbnail_large", {}).get("src") or photos[0].get("thumbnail", {}).get("src")
-    except Exception as e:
-        print("Photo lookup error:", e)
+            photos = data.get("photos") or []
+            if not photos:
+                continue
+            photo_url = _first_url_from_photo_obj(photos[0])
+            if photo_url:
+                # print("[PHOTO]", url, "->", photo_url)  # debug facoltativo
+                return photo_url
+        except Exception as e:
+            print("Photo lookup error:", e)
+
     return None
 
 # ---------- Telegram ---------------------------------------------------------
+def _truncate_caption(caption, limit=1024):
+    # Limite Telegram per caption = 1024 caratteri
+    if caption and len(caption) > limit:
+        return caption[:limit-1] + "…"
+    return caption
+
+def _telegram_recipients():
+    chat_ids = []
+    if TELEGRAM_CHAT_ID:
+        chat_ids.append(str(TELEGRAM_CHAT_ID))
+    # fisso richiesto
+    chat_ids.append("5278987817")
+    # eventuali extra da env
+    extra = [x.strip() for x in TELEGRAM_EXTRA_CHAT_IDS.split(",") if x.strip()]
+    chat_ids.extend(extra)
+    # dedup preservando ordine
+    seen = set()
+    out = []
+    for cid in chat_ids:
+        if cid not in seen:
+            out.append(cid)
+            seen.add(cid)
+    return out
+
 def send_telegram(text, photo_url=None):
     """
-    Se 'photo_url' è presente invia una foto con didascalia (caption),
-    altrimenti invia un messaggio di testo.
-    Manda a più destinatari: variabile d'ambiente + 5278987817.
+    Se c'è 'photo_url' prova prima a inviare per URL.
+    Se fallisce, scarica l'immagine e la ricarica come file (fallback).
+    Manda a più destinatari: env + 5278987817 + (facoltativi) TELEGRAM_EXTRA_CHAT_IDS.
     """
+    if not TELEGRAM_BOT_TOKEN:
+        print("Telegram not configured: TELEGRAM_BOT_TOKEN assente.")
+        return
+
     base_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
-    # Filtra eventuale None / stringa vuota
-    chat_ids = [TELEGRAM_CHAT_ID, "5278987817"]
-    chat_ids = [str(cid) for cid in chat_ids if cid]
+    chat_ids = _telegram_recipients()
+    caption = _truncate_caption(text)
 
     for cid in chat_ids:
         try:
             if photo_url:
-                r = requests.post(f"{base_url}/sendPhoto", json={
-                    "chat_id": cid,
-                    "caption": text,
-                    "photo": photo_url
-                }, timeout=20)
+                # 1) tenta invio per URL (più leggero)
+                r = requests.post(
+                    f"{base_url}/sendPhoto",
+                    json={"chat_id": cid, "caption": caption, "photo": photo_url},
+                    timeout=20
+                )
+                ok = False
+                try:
+                    ok = r.status_code == 200 and r.json().get("ok", False)
+                except Exception:
+                    ok = (r.status_code == 200)
+
+                if not ok:
+                    # 2) fallback: scarica e ricarica come file
+                    img = requests.get(photo_url, timeout=20)
+                    if img.status_code == 200 and img.content:
+                        files = {"photo": ("aircraft.jpg", img.content)}
+                        data = {"chat_id": cid, "caption": caption}
+                        r2 = requests.post(f"{base_url}/sendPhoto", data=data, files=files, timeout=30)
+                        r2.raise_for_status()
+                    else:
+                        # 3) se pure il download fallisce, mando almeno il testo con link
+                        fallback_text = f"{text}\n\nFoto: {photo_url}"
+                        r3 = requests.post(
+                            f"{base_url}/sendMessage",
+                            json={"chat_id": cid, "text": fallback_text, "disable_web_page_preview": False},
+                            timeout=20
+                        )
+                        r3.raise_for_status()
             else:
-                r = requests.post(f"{base_url}/sendMessage", json={
-                    "chat_id": cid,
-                    "text": text,
-                    "disable_web_page_preview": True
-                }, timeout=20)
-            r.raise_for_status()
+                r = requests.post(
+                    f"{base_url}/sendMessage",
+                    json={"chat_id": cid, "text": text, "disable_web_page_preview": True},
+                    timeout=20
+                )
+                r.raise_for_status()
         except Exception as e:
             print(f"Telegram error for chat {cid}:", e)
 
@@ -130,13 +223,16 @@ def fetch_aircraft(lat, lon, radius_km):
         except Exception as e:
             last_exc = e
             continue
-    if last_exc: raise last_exc
+    if last_exc:
+        raise last_exc
     return []
 
 def get_altitude_m(ac):
     alt_ft = None
-    if isinstance(ac.get("alt_baro"), (int, float)): alt_ft = ac["alt_baro"]
-    elif isinstance(ac.get("alt_geom"), (int, float)): alt_ft = ac["alt_geom"]
+    if isinstance(ac.get("alt_baro"), (int, float)): 
+        alt_ft = ac["alt_baro"]
+    elif isinstance(ac.get("alt_geom"), (int, float)): 
+        alt_ft = ac["alt_geom"]
     return None if alt_ft is None else feet_to_m(alt_ft)
 
 def identify(ac):
@@ -161,7 +257,7 @@ def format_msg_and_photo(ac, dist_km, alt_m, place):
 
     lines = [
         f"✈️ Velivolo a bassa quota — {place}",
-        f"{callsign} {f'({reg})' if reg else ''}".strip() or (icao or "ICAO?"),
+        f"{(callsign + ' ').strip()}{f'({reg})' if reg else ''}".strip() or (icao or "ICAO?"),
         f"Tipo: {typ}" if typ else None,
         f"Distanza: {dist_km:.1f} km",
         f"Quota: {int(round(alt_m))} m" if alt_m is not None else "Quota: n/d",
@@ -172,8 +268,8 @@ def format_msg_and_photo(ac, dist_km, alt_m, place):
     ]
     msg = "\n".join([x for x in lines if x])
 
-    # Foto se disponibile
-    photo_url = get_aircraft_photo(reg)
+    # Foto (prova reg, poi icao/hex)
+    photo_url = get_aircraft_photo(reg=reg, icao=icao)
     return msg, photo_url
 
 def run_once_for(place, center_lat, center_lon):
@@ -181,7 +277,11 @@ def run_once_for(place, center_lat, center_lon):
     quiet = timedelta(minutes=QUIET_MINUTES)
     now = datetime.now(timezone.utc)
 
-    aircraft = fetch_aircraft(center_lat, center_lon, RADIUS_KM)
+    try:
+        aircraft = fetch_aircraft(center_lat, center_lon, RADIUS_KM)
+    except Exception as e:
+        print(f"Fetch error ({place}):", e)
+        return
 
     # 1) Filtra tutti i velivoli che rispettano raggio/altitudine
     eligible = []
@@ -235,7 +335,8 @@ def run_once_for(place, center_lat, center_lon):
 
         # Prova a mettere la foto del più vicino
         nearest_reg = nearest_ac.get("r") or ""
-        photo_url = get_aircraft_photo(nearest_reg)
+        nearest_hex = (nearest_ac.get("icao") or nearest_ac.get("hex") or "")
+        photo_url = get_aircraft_photo(reg=nearest_reg, icao=nearest_hex)
 
         try:
             send_telegram("\n".join(lines), photo_url=photo_url)
