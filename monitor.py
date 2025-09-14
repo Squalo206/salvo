@@ -5,6 +5,7 @@ import os
 import math
 import json
 import requests
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 
 # === LOCALITÀ DA MONITORARE (nome, lat, lon) ===
@@ -112,6 +113,42 @@ def get_aircraft_photo(reg=None, icao=None):
 
     return None
 
+# ---------- FR24 links (app-first con fallback) ------------------------------
+def fr24_links(ac, lat=None, lon=None):
+    call = (ac.get("call") or ac.get("flight") or "").strip().replace(" ", "")
+    reg  = (ac.get("r") or "").strip().replace(" ", "")
+    if call:
+        path = call
+    elif reg:
+        path = f"data/aircraft/{reg}"
+    elif lat is not None and lon is not None:
+        path = f"{lat:.5f},{lon:.5f}/8"
+    else:
+        path = ""
+
+    https = f"https://www.flightradar24.com/{path}"
+    intent = (
+        "intent://www.flightradar24.com/" + path +
+        "#Intent;scheme=https;package=com.flightradar24free;" +
+        "S.browser_fallback_url=" + urllib.parse.quote(https, safe="") + ";end"
+    )
+    ios_scheme = "fr24://"   # apre l'app FR24 su iOS (se il client lo consente)
+    return {"https": https, "android_intent": intent, "ios_scheme": ios_scheme}
+
+def adsbx_url(ac):
+    hx = (ac.get("icao") or ac.get("hex") or "").strip().lower()
+    return f"https://globe.adsbexchange.com/?icao={hx}" if hx else "https://globe.adsbexchange.com/"
+
+def build_links_text(ac, lat=None, lon=None):
+    links = fr24_links(ac, lat, lon)
+    globe = adsbx_url(ac)
+    return "\n".join([
+        f"FR24 (Android app): {links['android_intent']}",
+        f"FR24 (iOS app): {links['ios_scheme']}",
+        f"FR24 (web): {links['https']}",
+        f"ADSBx (web): {globe}",
+    ])
+
 # ---------- Telegram ---------------------------------------------------------
 def _truncate_caption(caption, limit=1024):
     # Limite Telegram per caption = 1024 caratteri
@@ -137,11 +174,12 @@ def _telegram_recipients():
             seen.add(cid)
     return out
 
-def send_telegram(text, photo_url=None):
+def send_telegram(text, photo_url=None, extra_text=None):
     """
     Se c'è 'photo_url' prova prima a inviare per URL.
     Se fallisce, scarica l'immagine e la ricarica come file (fallback).
-    Manda a più destinatari: env + 5278987817 + (facoltativi) TELEGRAM_EXTRA_CHAT_IDS.
+    Dopo la foto (o il testo), se 'extra_text' è valorizzato, invia un secondo
+    messaggio di testo (utile per link lunghi come intent://, fr24://, ecc.).
     """
     if not TELEGRAM_BOT_TOKEN:
         print("Telegram not configured: TELEGRAM_BOT_TOKEN assente.")
@@ -175,8 +213,8 @@ def send_telegram(text, photo_url=None):
                         r2 = requests.post(f"{base_url}/sendPhoto", data=data, files=files, timeout=30)
                         r2.raise_for_status()
                     else:
-                        # 3) se pure il download fallisce, mando almeno il testo con link
-                        fallback_text = f"{text}\n\nFoto: {photo_url}"
+                        # 3) se pure il download fallisce, mando almeno il testo con link della foto
+                        fallback_text = f"{text}\n\n(Foto): {photo_url}"
                         r3 = requests.post(
                             f"{base_url}/sendMessage",
                             json={"chat_id": cid, "text": fallback_text, "disable_web_page_preview": False},
@@ -190,24 +228,18 @@ def send_telegram(text, photo_url=None):
                     timeout=20
                 )
                 r.raise_for_status()
+
+            # Eventuale secondo messaggio con i link (deep link app + web)
+            if extra_text and extra_text.strip():
+                rL = requests.post(
+                    f"{base_url}/sendMessage",
+                    json={"chat_id": cid, "text": extra_text, "disable_web_page_preview": False},
+                    timeout=20
+                )
+                rL.raise_for_status()
+
         except Exception as e:
             print(f"Telegram error for chat {cid}:", e)
-
-# ---- Link utili (FR24 + ADSBExchange) ---------------------------------------
-def fr24_url(ac, lat=None, lon=None):
-    call = (ac.get("call") or ac.get("flight") or "").strip().replace(" ", "")
-    reg  = (ac.get("r") or "").strip().replace(" ", "")
-    if call:
-        return f"https://www.flightradar24.com/{call}"
-    if reg:
-        return f"https://www.flightradar24.com/data/aircraft/{reg}"
-    if lat is not None and lon is not None:
-        return f"https://www.flightradar24.com/{lat:.5f},{lon:.5f}/8"
-    return "https://www.flightradar24.com/"
-
-def adsbx_url(ac):
-    hx = (ac.get("icao") or ac.get("hex") or "").strip().lower()
-    return f"https://globe.adsbexchange.com/?icao={hx}" if hx else "https://globe.adsbexchange.com/"
 
 # ---------------------------------------------------------------------------
 def fetch_aircraft(lat, lon, radius_km):
@@ -244,17 +276,15 @@ def identify(ac):
     return label, key
 
 def format_msg_and_photo(ac, dist_km, alt_m, place):
-    callsign = ac.get("call") or ac.get("flight") or ""
-    reg = ac.get("r") or ""
-    icao = ac.get("icao") or ac.get("hex") or ""
+    callsign = (ac.get("call") or ac.get("flight") or "").strip()
+    reg = (ac.get("r") or "").strip()
+    icao = (ac.get("icao") or ac.get("hex") or "").strip()
     typ = ac.get("t") or ac.get("type") or ""
     spd = ac.get("gs") or ac.get("spd")
     hdg = ac.get("trak") or ac.get("hdg")
     lat = ac.get("lat"); lon = ac.get("lon")
 
-    fr24 = fr24_url(ac, lat, lon)
-    globe = adsbx_url(ac)
-
+    # Messaggio "corto" senza i link (che invieremo a parte per aprire l'app)
     lines = [
         f"✈️ Velivolo a bassa quota — {place}",
         f"{(callsign + ' ').strip()}{f'({reg})' if reg else ''}".strip() or (icao or "ICAO?"),
@@ -263,14 +293,15 @@ def format_msg_and_photo(ac, dist_km, alt_m, place):
         f"Quota: {int(round(alt_m))} m" if alt_m is not None else "Quota: n/d",
         f"Velocità: {int(round(spd))} kt" if isinstance(spd, (int, float)) else None,
         f"Prua: {int(round(hdg))}°" if isinstance(hdg, (int, float)) else None,
-        f"FR24: {fr24}",
-        f"ADSBx: {globe}",
     ]
     msg = "\n".join([x for x in lines if x])
 
+    # Link (FR24 app-first + ADSBx) in messaggio separato
+    links_text = build_links_text(ac, lat, lon)
+
     # Foto (prova reg, poi icao/hex)
     photo_url = get_aircraft_photo(reg=reg, icao=icao)
-    return msg, photo_url
+    return msg, links_text, photo_url
 
 def run_once_for(place, center_lat, center_lon):
     state = load_state()
@@ -308,9 +339,10 @@ def run_once_for(place, center_lat, center_lon):
         last = state.get(scoped_key)
         if last and (now - last) < quiet:
             continue
-        msg, photo_url = format_msg_and_photo(ac, dist_km, alt_m, place)
+        msg, links_text, photo_url = format_msg_and_photo(ac, dist_km, alt_m, place)
         try:
-            send_telegram(msg, photo_url=photo_url)
+            # Invia foto (o testo) + secondo messaggio con i link (deep link app)
+            send_telegram(msg, photo_url=photo_url, extra_text=links_text)
             state[scoped_key] = now
             alerted += 1
         except Exception as e:
@@ -330,8 +362,7 @@ def run_once_for(place, center_lat, center_lon):
             lines.append(f"+{len(eligible)-6} altri…")
 
         lat = nearest_ac.get("lat"); lon = nearest_ac.get("lon")
-        lines.append(f"FR24: {fr24_url(nearest_ac, lat, lon)}")
-        lines.append(f"ADSBx: {adsbx_url(nearest_ac)}")
+        links_text = build_links_text(nearest_ac, lat, lon)
 
         # Prova a mettere la foto del più vicino
         nearest_reg = nearest_ac.get("r") or ""
@@ -339,7 +370,7 @@ def run_once_for(place, center_lat, center_lon):
         photo_url = get_aircraft_photo(reg=nearest_reg, icao=nearest_hex)
 
         try:
-            send_telegram("\n".join(lines), photo_url=photo_url)
+            send_telegram("\n".join(lines), photo_url=photo_url, extra_text=links_text)
         except Exception as e:
             print(f"Telegram summary error ({place}):", e)
 
