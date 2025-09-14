@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 # === LOCALITÀ DA MONITORARE (nome, lat, lon) ===
 LOCATIONS = [
-   # === ("San Salvo", 42.050, 14.717),
+    # ("San Salvo", 42.050, 14.717),
     ("Isernia",   41.5931, 14.2326),
 ]
 
@@ -21,7 +21,7 @@ PROVIDERS = [
 ]
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
+TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID")  # può non esserci -> gestito sotto
 
 def km_to_nm(km): return km * 0.539956803
 def feet_to_m(ft): return ft * 0.3048
@@ -49,16 +49,58 @@ def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump({k: v.isoformat() for k, v in state.items()}, f)
 
-def send_telegram(text):
-    # Invia a più chat ID: quello principale e quello aggiuntivo
+# ---------- Foto aereo (Planespotters) ---------------------------------------
+def get_aircraft_photo(reg):
+    """
+    Restituisce URL di una foto (se disponibile) per la registrazione 'reg'
+    usando l'API pubblica di planespotters.net.
+    """
+    if not reg:
+        return None
+    try:
+        url = f"https://api.planespotters.net/photos/reg/{reg}"
+        r = requests.get(url, timeout=10)
+        if r.status_code == 200:
+            data = r.json()
+            photos = data.get("photos", [])
+            if photos:
+                # Preferisco la miniatura grande per compatibilità e rapidità
+                return photos[0].get("thumbnail_large", {}).get("src") or photos[0].get("thumbnail", {}).get("src")
+    except Exception as e:
+        print("Photo lookup error:", e)
+    return None
+
+# ---------- Telegram ---------------------------------------------------------
+def send_telegram(text, photo_url=None):
+    """
+    Se 'photo_url' è presente invia una foto con didascalia (caption),
+    altrimenti invia un messaggio di testo.
+    Manda a più destinatari: variabile d'ambiente + 5278987817.
+    """
+    base_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+    # Filtra eventuale None / stringa vuota
     chat_ids = [TELEGRAM_CHAT_ID, "5278987817"]
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    chat_ids = [str(cid) for cid in chat_ids if cid]
+
     for cid in chat_ids:
-        r = requests.post(url, json={"chat_id": cid, "text": text, "disable_web_page_preview": True}, timeout=20)
-        r.raise_for_status()
+        try:
+            if photo_url:
+                r = requests.post(f"{base_url}/sendPhoto", json={
+                    "chat_id": cid,
+                    "caption": text,
+                    "photo": photo_url
+                }, timeout=20)
+            else:
+                r = requests.post(f"{base_url}/sendMessage", json={
+                    "chat_id": cid,
+                    "text": text,
+                    "disable_web_page_preview": True
+                }, timeout=20)
+            r.raise_for_status()
+        except Exception as e:
+            print(f"Telegram error for chat {cid}:", e)
 
 # ---- Link utili (FR24 + ADSBExchange) ---------------------------------------
-
 def fr24_url(ac, lat=None, lon=None):
     call = (ac.get("call") or ac.get("flight") or "").strip().replace(" ", "")
     reg  = (ac.get("r") or "").strip().replace(" ", "")
@@ -75,7 +117,6 @@ def adsbx_url(ac):
     return f"https://globe.adsbexchange.com/?icao={hx}" if hx else "https://globe.adsbexchange.com/"
 
 # ---------------------------------------------------------------------------
-
 def fetch_aircraft(lat, lon, radius_km):
     range_nm = max(1, int(round(km_to_nm(radius_km))))
     last_exc = None
@@ -106,7 +147,7 @@ def identify(ac):
     key = (icao or callsign or reg or "unknown").upper()
     return label, key
 
-def format_msg(ac, dist_km, alt_m, place):
+def format_msg_and_photo(ac, dist_km, alt_m, place):
     callsign = ac.get("call") or ac.get("flight") or ""
     reg = ac.get("r") or ""
     icao = ac.get("icao") or ac.get("hex") or ""
@@ -129,7 +170,11 @@ def format_msg(ac, dist_km, alt_m, place):
         f"FR24: {fr24}",
         f"ADSBx: {globe}",
     ]
-    return "\n".join([x for x in lines if x])
+    msg = "\n".join([x for x in lines if x])
+
+    # Foto se disponibile
+    photo_url = get_aircraft_photo(reg)
+    return msg, photo_url
 
 def run_once_for(place, center_lat, center_lon):
     state = load_state()
@@ -138,6 +183,7 @@ def run_once_for(place, center_lat, center_lon):
 
     aircraft = fetch_aircraft(center_lat, center_lon, RADIUS_KM)
 
+    # 1) Filtra tutti i velivoli che rispettano raggio/altitudine
     eligible = []
     for ac in aircraft:
         lat, lon = ac.get("lat"), ac.get("lon")
@@ -151,23 +197,26 @@ def run_once_for(place, center_lat, center_lon):
             continue
         eligible.append((dist_km, alt_m, ac))
 
+    # Ordina per distanza (più vicini prima)
     eligible.sort(key=lambda x: x[0])
 
+    # 2) Invia alert individuali solo per i "nuovi" (fuori quiet)
     alerted = 0
     for dist_km, alt_m, ac in eligible:
         _, key = identify(ac)
-        scoped_key = f"{place}:{key}"
+        scoped_key = f"{place}:{key}"  # antispam separato per località
         last = state.get(scoped_key)
         if last and (now - last) < quiet:
             continue
-        msg = format_msg(ac, dist_km, alt_m, place)
+        msg, photo_url = format_msg_and_photo(ac, dist_km, alt_m, place)
         try:
-            send_telegram(msg)
+            send_telegram(msg, photo_url=photo_url)
             state[scoped_key] = now
             alerted += 1
         except Exception as e:
             print(f"Telegram error ({place}):", e)
 
+    # 3) Se non è partito nulla ma "ci sono velivoli", manda un riepilogo (almeno 1 messaggio ogni run)
     if alerted == 0 and len(eligible) > 0:
         nearest_dist, nearest_alt, nearest_ac = eligible[0]
         lines = [
@@ -184,8 +233,12 @@ def run_once_for(place, center_lat, center_lon):
         lines.append(f"FR24: {fr24_url(nearest_ac, lat, lon)}")
         lines.append(f"ADSBx: {adsbx_url(nearest_ac)}")
 
+        # Prova a mettere la foto del più vicino
+        nearest_reg = nearest_ac.get("r") or ""
+        photo_url = get_aircraft_photo(nearest_reg)
+
         try:
-            send_telegram("\n".join(lines))
+            send_telegram("\n".join(lines), photo_url=photo_url)
         except Exception as e:
             print(f"Telegram summary error ({place}):", e)
 
