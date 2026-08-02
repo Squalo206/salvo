@@ -1,4 +1,4 @@
-name: ADS-B low altitude alert (San Salvo)
+name: ADS-B low altitude alert (Isernia)
 
 on:
   schedule:
@@ -16,10 +16,10 @@ jobs:
       cancel-in-progress: true
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.x"
 
@@ -32,6 +32,15 @@ jobs:
             echo "State exists"
           else
             echo "{}" > state.json
+          fi
+
+      - name: Validate Telegram configuration
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+            echo "::error::Missing TELEGRAM_BOT_TOKEN repository secret"
+            exit 1
           fi
 
       - name: Run monitor
