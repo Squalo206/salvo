@@ -182,13 +182,13 @@ def send_telegram(text, photo_url=None, extra_text=None):
     messaggio di testo (utile per link lunghi come intent://, fr24://, ecc.).
     """
     if not TELEGRAM_BOT_TOKEN:
-        print("Telegram not configured: TELEGRAM_BOT_TOKEN assente.")
-        return
+        raise RuntimeError("Telegram non configurato: TELEGRAM_BOT_TOKEN assente")
 
     base_url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
     chat_ids = _telegram_recipients()
     caption = _truncate_caption(text)
 
+    errors = []
     for cid in chat_ids:
         try:
             if photo_url:
@@ -240,6 +240,12 @@ def send_telegram(text, photo_url=None, extra_text=None):
 
         except Exception as e:
             print(f"Telegram error for chat {cid}:", e)
+            errors.append(f"{cid}: {e}")
+
+    if errors:
+        raise RuntimeError("Invio Telegram fallito per " + "; ".join(errors))
+
+    return True
 
 # ---------------------------------------------------------------------------
 def fetch_aircraft(lat, lon, radius_km):
@@ -252,6 +258,7 @@ def fetch_aircraft(lat, lon, radius_km):
             if resp.status_code == 200:
                 data = resp.json()
                 return data.get("ac", []) or []
+            last_exc = RuntimeError(f"{base} ha risposto HTTP {resp.status_code}")
         except Exception as e:
             last_exc = e
             continue
@@ -333,6 +340,7 @@ def run_once_for(place, center_lat, center_lon):
 
     # 2) Invia alert individuali solo per i "nuovi" (fuori quiet)
     alerted = 0
+    delivery_errors = []
     for dist_km, alt_m, ac in eligible:
         _, key = identify(ac)
         scoped_key = f"{place}:{key}"  # antispam separato per località
@@ -347,6 +355,7 @@ def run_once_for(place, center_lat, center_lon):
             alerted += 1
         except Exception as e:
             print(f"Telegram error ({place}):", e)
+            delivery_errors.append(str(e))
 
     # 3) Se non è partito nulla ma "ci sono velivoli", manda un riepilogo (almeno 1 messaggio ogni run)
     if alerted == 0 and len(eligible) > 0:
@@ -373,17 +382,25 @@ def run_once_for(place, center_lat, center_lon):
             send_telegram("\n".join(lines), photo_url=photo_url, extra_text=links_text)
         except Exception as e:
             print(f"Telegram summary error ({place}):", e)
+            delivery_errors.append(str(e))
 
     save_state(state)
     print(f"[{place}] {now.isoformat()} — eligible: {len(eligible)} — alerts sent: {alerted}")
+    if delivery_errors:
+        raise RuntimeError("; ".join(delivery_errors))
 
 def main():
+    errors = []
     for name, lat, lon in LOCATIONS:
         print(f"--- Controllo {name} ---")
         try:
             run_once_for(name, lat, lon)
         except Exception as e:
             print(f"Errore per {name}: {e}")
+            errors.append(f"{name}: {e}")
+
+    if errors:
+        raise SystemExit("Monitor fallito: " + "; ".join(errors))
 
 if __name__ == "__main__":
     main()
