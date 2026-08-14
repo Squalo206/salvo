@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 # === LOCALITÀ DA MONITORARE (nome, lat, lon) ===
 LOCATIONS = [
-    ("San Salvo", 42.050, 14.717),
+   # ("San Salvo", 42.050, 14.717),
     ("Isernia",   41.5931, 14.2326),
 ]
 
